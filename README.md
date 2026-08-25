@@ -1,9 +1,9 @@
 ### Announcement 
-Due to personal health reasons, the project will no longer be maintained by the old owner (Jontte), I’ll try to maintain this for the time being however!!
+Due to personal health reasons, the project will no longer be maintained by the old owner (Jontte), I’ll try to maintain this for the time being!
 
 ### If you forked before June 7, 2026, please pull the latest version — previous versions had an auth bypass and startup DDoS vulnerability.
 
-### Reasoning officially works! Aside from Gemma and M3, every model (that supports reasoning) works. To use reasoning, use the [optional environmental variables](#optional-environment-variables) section!
+### Reasoning officially works! Every model (that supports reasoning) works. To use reasoning, use the [optional environmental variables](#optional-environment-variables) section!
 
 
 ### NVIDIA NIM to OpenAI Proxy
@@ -29,8 +29,7 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 |---|---|---|---|---|
 | `gpt-4-turbo` | `moonshotai/kimi-k2.6` | Deep, immersive RP | Medium | Medium-High |
 | `gpt-4` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
-| `gpt-4o` | `deepseek-ai/deepseek-v4-pro` | Coding, non-edgy RP | Slow | High |
-| `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash` | Fast, non-edgy RP | Fast | High |
+| `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash-0731` | Fast, non-edgy RP | Fast | High |
 | `gpt-3.5o` | `nvidia/nemotron-mini-4b-instruct` | Lightweight RP, fast responses | Very Fast | Low |
 | `gemini-pro` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Daily driver, low latency | Fast | Low |
 | `gemini-turbo` | `meta/llama-3.3-70b-instruct` | Fast general purpose | Fast | Low-Medium |
@@ -42,7 +41,6 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `mistral-nemo` | `mistralai/mistral-nemotron` | Casual/anime RP | Fast | Low |
 | `claude-3-opus` | `openai/gpt-oss-120b` | Alternative to Chinese models | Medium | Low-Medium |
 | `claude-3-sonnet` | `openai/gpt-oss-20b` | Fast, distinct voice | Fast | Low-Medium |
-| `glm-5.2` | `z-ai/glm-5.2` | General purpose & Coding | Medium | Medium |
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
 | `gpt-3.5` | `qwen/qwen3.5-397b-a17b` | Qwen fallback | Medium | Medium |
 | `google-light` | `google/gemma-4-31b-it` | Short scenes, fast | Fast | Low-Medium |
@@ -57,11 +55,11 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 
 | If your use-case involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
+| Dark themes, violence, mature content | `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
 | Fast responses needed | `mistral` (675B) | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
-| Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4`, `gpt-4o`, `glm-5.2` |
+| Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4` |
 | Testing / very fast replies | — | `google-lightest`, `gpt-3.5o` |
-| Coding / Long horizon work | — | `glm-5.2`, `gpt-4o` |
+| Coding / Long horizon work | — | No good model currently |
 
 ### Fallback Chain
 
@@ -102,7 +100,7 @@ After deploying, you can set these in Railway's **Variables** tab (reasoning doe
 | `ENABLE_THINKING_MODE` | `true` | Sends thinking parameters to supported models |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
-
+| `DEBUG_MODE` | `true` | Allows you to debug everything going on.
 
 Set to `false` or remove to disable. Changes apply without redeploying.
 
@@ -128,7 +126,7 @@ This is a personal project I am maintaining for my own use, but I'm happy if it 
 - Documentation improvements
 
 ### What I'm less likely to merge
-- Major architectural changes (I want to keep this simple as to honour Jontte’s wishes.)
+- Major architectural changes.
 - Features I don't personally use (harder for me to maintain)
 - Anything that adds complexity without clear benefit
 
