@@ -354,7 +354,7 @@ app.get('/', (req, res) => {
     <p>this is an API, not a website. nothing lives at the root path.</p>
     <p>send requests to <code>/v1/chat/completions</code> with an <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
     <p>status check, no token needed: <code>/health</code></p>
-    <p>bugs / questions: <a href="https://github.com/skywalker14017/nim-to-openai-proxy" style="color:#7ee787;">open an issue on GitHub</a>, not my DMs</p>
+    <p>bugs / questions: <a href="https://github.com/skywalker14017/nim-to-openai-proxy" style="color:#7ee787;">open an issue on GitHub</a>, or hit me up on Discord — I'll be faster there: <code>skywalker_1401</code></p>
   </div>
 </body>
 </html>`);
@@ -835,3 +835,4 @@ app.listen(PORT, () => {
     console.error('[VALIDATION] Startup check failed:', err.message);
   });
 });
+
