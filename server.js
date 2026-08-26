@@ -350,11 +350,16 @@ app.get('/', (req, res) => {
 </head>
 <body>
   <div class="card">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" style="margin: 0 auto 14px; display: block;">
+      <circle cx="12" cy="12" r="11" stroke="#7ee787" stroke-width="1.5"/>
+      <path d="M7 12.5l3 3 6-6.5" stroke="#7ee787" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
     <h1>it's up.</h1>
-    <p>this is an API, not a website. nothing lives at the root path.</p>
+    <p>this proxies OpenAI-format chat requests to NVIDIA NIM. point any OpenAI-compatible client at it, pick a model with a plain alias (<code>gpt-4</code>, <code>mistral</code>, etc), and it handles model fallback, streaming, and each backend's own reasoning/thinking quirks for you.</p>
+    <p>it's an API, not a website: nothing lives at this root path.</p>
     <p>send requests to <code>/v1/chat/completions</code> with an <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
     <p>status check, no token needed: <code>/health</code></p>
-    <p>bugs / questions: <a href="https://github.com/skywalker14017/nim-to-openai-proxy" style="color:#7ee787;">open an issue on GitHub</a>, or hit me up on Discord — I'll be faster there: <code>skywalker_1401</code></p>
+    <p>bugs / questions: <a href="https://github.com/skywalker14017/nim-to-openai-proxy" style="color:#7ee787;">open an issue on GitHub</a> (docs are there too), or hit me up on Discord (i'll be faster there): <code>skywalker_1401</code></p>
   </div>
 </body>
 </html>`);
