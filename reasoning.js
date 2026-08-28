@@ -183,9 +183,11 @@ const REASONING_EFFORT_ENUMS = {
   'mistralai/mistral-medium-3.5-128b': ['high', 'none'],
   'mistralai/mistral-small-4-119b-2603': ['high', 'none'],
 
-  // reasoning_effort lives inside chat_template_kwargs for this model (see
-  // getReasoningPayload below); thinking on/off is a separate flag.
+  // reasoning_effort lives inside chat_template_kwargs for these two (see
+  // getReasoningPayload below); thinking on/off is a separate flag. Pro and
+  // Flash share the same V4 chat template, so they share the same enum.
   'deepseek-ai/deepseek-v4-flash-0731': ['low', 'high', 'max'],
+  'deepseek-ai/deepseek-v4-pro-0813': ['low', 'high', 'max'],
 
   // Not a true adaptive/effort scale — these two only expose a single extra
   // "low_effort" middle tier between full reasoning and off.
@@ -193,7 +195,12 @@ const REASONING_EFFORT_ENUMS = {
   'nvidia/nemotron-3-ultra-550b-a55b': ['low'],
 
   // MiniMax-M3's only non-binary option: let the model decide per-turn.
-  'minimaxai/minimax-m3': ['adaptive']
+  'minimaxai/minimax-m3': ['adaptive'],
+
+  // K3 can never fully disable reasoning (see the kimi-k3 case in
+  // getReasoningPayload below) — this enum only governs how hard it thinks,
+  // never whether it thinks at all.
+  'moonshotai/kimi-k3': ['low', 'high', 'max']
 };
 
 function validReasoningEffort(model, effort) {
@@ -263,8 +270,9 @@ function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTo
       return { chat_template_kwargs: { enable_thinking: false } };
     }
 
-    case 'deepseek-ai/deepseek-v4-flash-0731': {
-      // This model controls reasoning via chat_template_kwargs — NOT a
+    case 'deepseek-ai/deepseek-v4-flash-0731':
+    case 'deepseek-ai/deepseek-v4-pro-0813': {
+      // Both V4 models control reasoning via chat_template_kwargs — NOT a
       // bare top-level reasoning_effort field.
       if (!enableThinking) {
         return { chat_template_kwargs: { thinking: false } };
@@ -318,6 +326,21 @@ function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTo
         ? 'adaptive'
         : (enableThinking ? 'enabled' : 'disabled');
       return { chat_template_kwargs: { thinking_mode: thinkingMode } };
+    }
+
+    case 'moonshotai/kimi-k3': {
+      // K3 has no off-switch: the API always runs a thinking pass before
+      // answering, so unlike every other model above there's no
+      // chat_template_kwargs.thinking:false (or equivalent) to send. The
+      // only lever is how much it thinks, via a top-level reasoning_effort.
+      //
+      // When thinking is "off" for this request, ask for the lowest tier
+      // instead of returning {} — omitting the field lets it fall through
+      // to Kimi's own default of 'max', the slowest and most expensive
+      // setting, which would silently ignore the caller's intent to keep
+      // this request cheap.
+      if (effort) return { reasoning_effort: effort };
+      return { reasoning_effort: enableThinking ? 'high' : 'low' };
     }
 
     default:
