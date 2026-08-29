@@ -32,9 +32,13 @@ if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 // Backend models that embed reasoning inline in `content` via delimiter tags,
 // rather than returning it as a separate structured field. Mapped to their
 // specific tag pair so DelimiterParser knows what to look for.
+//
+// [FIX 2026-08-29] Removed qwen/qwen3.5-397b-a17b and
+// nvidia/llama-3.3-nemotron-super-49b-v1.5 — both pulled from NIM's live
+// catalog and no longer referenced anywhere in server.js's MODEL_MAPPING.
+// Dead entries here were harmless (they just never matched), but cleaning
+// them out keeps this in sync with what's actually reachable.
 const CONTENT_DELIMITER_TAGS = {
-  'qwen/qwen3.5-397b-a17b': ['<think>', '</think>'],
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5': ['<think>', '</think>'],
   // MiniMax-M3 uses its own namespaced tag, not the generic <think> one.
   'minimaxai/minimax-m3': ['<mm:think>', '</mm:think>']
 };
@@ -177,11 +181,13 @@ function normalizeNonStreamChoice(choice, model) {
 // Valid reasoning_effort values per backend model, where the backend enforces
 // an enum. Anything outside this set is dropped rather than forwarded, so a
 // bad client value fails fast in proxy logs instead of as an opaque upstream 400.
+//
+// [FIX 2026-08-29] Removed mistralai/mistral-medium-3.5-128b and
+// mistralai/mistral-small-4-119b-2603 — both pulled from NIM's live catalog
+// and no longer referenced anywhere in server.js's MODEL_MAPPING.
 const REASONING_EFFORT_ENUMS = {
   'openai/gpt-oss-120b': ['low', 'medium', 'high'],
   'openai/gpt-oss-20b': ['low', 'medium', 'high'],
-  'mistralai/mistral-medium-3.5-128b': ['high', 'none'],
-  'mistralai/mistral-small-4-119b-2603': ['high', 'none'],
 
   // reasoning_effort lives inside chat_template_kwargs for these two (see
   // getReasoningPayload below); thinking on/off is a separate flag. Pro and
@@ -237,6 +243,11 @@ function resolveEffectiveThinking(enableThinking, clientReasoningEffort) {
 // Caveat: gpt-oss models structurally always emit a reasoning channel, so
 // this can only reduce them to their baseline default, not eliminate
 // reasoning tokens entirely the way it can for other models here.
+//
+// [FIX 2026-08-29] Removed the qwen/qwen3.5-397b-a17b case and the combined
+// mistral-medium-3.5-128b / mistral-small-4-119b-2603 case — all three
+// backend model IDs are dead in NIM's live catalog and no longer referenced
+// in server.js's MODEL_MAPPING, so these cases could never be reached.
 function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools) {
   enableThinking = resolveEffectiveThinking(enableThinking, clientReasoningEffort);
 
@@ -262,14 +273,6 @@ function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTo
       return payload;
     }
 
-    case 'qwen/qwen3.5-397b-a17b': {
-      // Model appears to default to thinking-on in its chat template. Only send
-      // a field when the caller explicitly wants thinking OFF; otherwise let the
-      // <think> delimiter parser handle whatever the model does natively.
-      if (enableThinking) return {};
-      return { chat_template_kwargs: { enable_thinking: false } };
-    }
-
     case 'deepseek-ai/deepseek-v4-flash-0731':
     case 'deepseek-ai/deepseek-v4-pro-0813': {
       // Both V4 models control reasoning via chat_template_kwargs — NOT a
@@ -293,13 +296,6 @@ function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTo
       return {};
     }
 
-    case 'mistralai/mistral-medium-3.5-128b':
-    case 'mistralai/mistral-small-4-119b-2603': {
-      if (effort) return { reasoning_effort: effort };
-      if (enableThinking) return { reasoning_effort: 'high' };
-      return {};
-    }
-
     case 'google/gemma-4-31b-it': {
       if (!enableThinking) return {};
       // enable_thinking alone makes the model reason internally but doesn't
@@ -310,11 +306,6 @@ function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTo
         chat_template_kwargs: { enable_thinking: true },
         include_reasoning: SHOW_REASONING
       };
-    }
-
-    case 'stepfun-ai/step-3.7-flash': {
-      if (enableThinking) return {};
-      return { chat_template_kwargs: { thinking: false } };
     }
 
     case 'minimaxai/minimax-m3': {
