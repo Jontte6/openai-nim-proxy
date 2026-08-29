@@ -31,13 +31,9 @@ if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 
 // Backend models that embed reasoning inline in `content` via delimiter tags,
 // rather than returning it as a separate structured field. Mapped to their
-// specific tag pair so DelimiterParser knows what to look for.
-//
-// [FIX 2026-08-29] Removed qwen/qwen3.5-397b-a17b and
-// nvidia/llama-3.3-nemotron-super-49b-v1.5 — both pulled from NIM's live
-// catalog and no longer referenced anywhere in server.js's MODEL_MAPPING.
-// Dead entries here were harmless (they just never matched), but cleaning
-// them out keeps this in sync with what's actually reachable.
+// specific tag pair so DelimiterParser knows what to look for. Only models
+// that actually use this convention need an entry — everything else uses
+// structured fields and is left alone by StreamNormalizer.
 const CONTENT_DELIMITER_TAGS = {
   // MiniMax-M3 uses its own namespaced tag, not the generic <think> one.
   'minimaxai/minimax-m3': ['<mm:think>', '</mm:think>']
@@ -181,10 +177,6 @@ function normalizeNonStreamChoice(choice, model) {
 // Valid reasoning_effort values per backend model, where the backend enforces
 // an enum. Anything outside this set is dropped rather than forwarded, so a
 // bad client value fails fast in proxy logs instead of as an opaque upstream 400.
-//
-// [FIX 2026-08-29] Removed mistralai/mistral-medium-3.5-128b and
-// mistralai/mistral-small-4-119b-2603 — both pulled from NIM's live catalog
-// and no longer referenced anywhere in server.js's MODEL_MAPPING.
 const REASONING_EFFORT_ENUMS = {
   'openai/gpt-oss-120b': ['low', 'medium', 'high'],
   'openai/gpt-oss-20b': ['low', 'medium', 'high'],
@@ -243,11 +235,6 @@ function resolveEffectiveThinking(enableThinking, clientReasoningEffort) {
 // Caveat: gpt-oss models structurally always emit a reasoning channel, so
 // this can only reduce them to their baseline default, not eliminate
 // reasoning tokens entirely the way it can for other models here.
-//
-// [FIX 2026-08-29] Removed the qwen/qwen3.5-397b-a17b case and the combined
-// mistral-medium-3.5-128b / mistral-small-4-119b-2603 case — all three
-// backend model IDs are dead in NIM's live catalog and no longer referenced
-// in server.js's MODEL_MAPPING, so these cases could never be reached.
 function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools) {
   enableThinking = resolveEffectiveThinking(enableThinking, clientReasoningEffort);
 
