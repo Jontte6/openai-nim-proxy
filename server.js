@@ -5,6 +5,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const https = require('https');
 const { StringDecoder } = require('string_decoder');
 const { timingSafeEqual } = require('crypto');
 const { SHOW_REASONING, getReasoningPayload, resolveEffectiveThinking, StreamNormalizer, normalizeNonStreamChoice } = require('./reasoning');
@@ -28,6 +29,26 @@ const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
 
 const MAX_TOKENS_LIMIT = 65536;
+
+// Reused across every outbound request to NIM. On a long-lived process
+// (Render, Railway, a VPS, etc.) this lets repeated requests reuse an
+// existing TCP/TLS connection instead of paying handshake cost every time.
+// Has no meaningful effect on serverless platforms where the process
+// itself doesn't persist between invocations — the win here is specific to
+// persistent deployments.
+const keepAliveAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 50,
+  maxFreeSockets: 10
+});
+
+// Dedicated axios instance for all upstream NIM calls, wired to the shared
+// keep-alive agent above. Anything hitting NIM_API_BASE should go through
+// this instead of bare axios so connection reuse actually applies.
+const nim = axios.create({
+  baseURL: NIM_API_BASE,
+  httpsAgent: keepAliveAgent
+});
 
 // Time-to-first-byte ceiling for a model attempt before it's treated as
 // failed and the fallback chain moves to the next model. Reasoning models
@@ -62,19 +83,18 @@ validateConfig();
 
 // ─── Model Mapping ─────────────────────────────────────────────────────────
 
-// [FIX 2026-08-29] Confirmed live vs dead against a real GET /v1/models pull
-// on this date. A bunch of these aliases pointed at backends NVIDIA had
-// already dropped from the catalog — which meant every request that needed
-// to fall back (or that hit an unmapped alias and landed on DEFAULT_MODEL)
-// was burning multiple failed attempts against models that flat-out don't
-// exist anymore before ever reaching a live one. That dead-attempt tax,
-// stacked on top of NIM's own reasoning-model latency, is what was actually
-// causing requests to crawl. Each swapped line below notes what it replaced.
+// Model aliases are periodically re-checked against NIM's live catalog (see
+// validateModels() below and GET /v1/models?live=true). An alias pointing
+// at a backend NVIDIA has since dropped from the catalog burns a guaranteed
+// failed attempt on every request that uses it before falling through to
+// FALLBACK_MODELS — so keeping this mapping current is a latency concern,
+// not just a correctness one. Each swapped line below notes what it
+// replaced, where relevant.
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
   'gpt-3.5': 'nvidia/nemotron-3-nano-30b-a3b', // was qwen/qwen3.5-397b-a17b — pulled from catalog
-  'gpt-4-turbo': 'moonshotai/kimi-k3', // NOTE: kimi-k2.6 showed back up as live in the 2026-08-29 catalog pull, despite the old note below saying NVIDIA pulled it. Worth double-checking build.nvidia.com yourself before deciding whether to switch back — didn't want to silently flip this on you.
+  'gpt-4-turbo': 'moonshotai/kimi-k3',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
   'gemini-pro': 'nvidia/llama-3.1-nemotron-70b-instruct', // was nvidia/llama-3.3-nemotron-super-49b-v1.5 — pulled from catalog
@@ -91,33 +111,26 @@ const MODEL_MAPPING = {
   'google-lightest': 'google/gemma-2b', // was google/gemma-2-2b-it — pulled from catalog (naming changed too, no "-it" variant of gemma-2 live anymore)
   'google-lighter': 'google/gemma-3-4b-it', // was google/gemma-3n-e4b-it — pulled from catalog
   'm3': 'minimaxai/minimax-m3'
-  // Removed 'gemini-turbo?': that stray key (note the literal "?") mapped to
-  // abacusai/dracarys-llama-3.1-70b-instruct, which is also dead now. Looked
-  // like an accidental duplicate/test entry rather than something a client
-  // would ever intentionally request — add it back with a real backend if
-  // it was actually load-bearing.
-  //
-  // Removed 'm2.7': minimaxai/minimax-m2.7 is dead, and 'm3' already covers
-  // the only live MiniMax model, so this alias had no live backend left to
-  // fall back to on its own.
-  //
-  // Removed 'step-3.5-flash' / 'step-3.7-flash': stepfun-ai has ZERO models
-  // in the live catalog as of this check, not just these two IDs — there's
-  // no live stepfun equivalent to swap in. If you still want a stepfun
-  // alias, you'll need to pick a different backend model for it manually.
+  // A few previously-defined aliases were removed because their backend
+  // models are no longer in NIM's catalog and had no live equivalent to
+  // fall back to: 'gemini-turbo?' (a stray key, likely an accidental
+  // duplicate/test entry), 'm2.7' (superseded by 'm3', which already
+  // covers the only live MiniMax model), and 'step-3.5-flash' /
+  // 'step-3.7-flash' (stepfun-ai currently has zero live models on NIM).
 };
 
-// Default model used when an unrecognized alias is requested.
-const DEFAULT_MODEL = 'google/gemma-4-31b-it'; // [FIX 2026-08-29] was nvidia/llama-3.3-nemotron-super-49b-v1.5 — dead. Every unmapped-alias request was silently eating a guaranteed-fail attempt against a nonexistent model before falling through to FALLBACK_MODELS.
+// Used when an unrecognized alias is requested. Must point at a live
+// model — an unmapped alias landing on a dead default silently eats a
+// guaranteed failed attempt before ever reaching FALLBACK_MODELS.
+const DEFAULT_MODEL = 'google/gemma-4-31b-it';
 
+// Ordered by empirically observed reliability/speed, not just "any live
+// model." A model earlier in this list that's currently failing (rate
+// limited, timing out, etc.) delays every fallback behind it, so the
+// fastest/most-reliable known-good model should go first.
 const FALLBACK_MODELS = [
-  // [FIX 2026-08-29] 3 of these 4 were dead (mistral-medium-3.5-128b,
-  // mistral-small-4-119b-2603, llama-3.3-nemotron-super-49b-v1.5) — meaning
-  // almost every fallback-triggering request had to fail 3 times against
-  // models that don't exist before ever reaching the one that worked
-  // (gemma-4-31b-it). That was the main source of the "hella slow" symptom.
-  'google/gemma-4-31b-it',
   'openai/gpt-oss-20b',
+  'google/gemma-4-31b-it',
   'mistralai/mistral-nemotron',
   'nvidia/nemotron-3-super-120b-a12b'
 ];
@@ -208,7 +221,7 @@ app.use((req, res, next) => {
 // below, so there's one implementation of "ask NIM what's actually there"
 // instead of two that can quietly drift apart.
 async function fetchLiveModelIds() {
-  const response = await axios.get(`${NIM_API_BASE}/models`, {
+  const response = await nim.get('/models', {
     headers: {
       Authorization: `Bearer ${NIM_API_KEY}`,
       'Content-Type': 'application/json'
@@ -292,13 +305,41 @@ function safeWrite(res, data) {
 
 // ─── Helper: Fallback Chain ─────────────────────────────────────────────────
 
+// In-memory per-model cooldown tracker. A model that just came back 429
+// (rate limited) or 403 (access tier the current key doesn't have) is
+// skipped for a window on subsequent requests, instead of every incoming
+// request re-discovering "this model doesn't work right now" the hard way
+// via its own failed attempt and timeout. Deliberately in-process rather
+// than shared/persisted — resets on restart, and doesn't coordinate across
+// multiple instances if you ever run more than one.
+const modelCooldowns = new Map(); // model -> timestamp (ms) until which to skip it
+
+const RATE_LIMIT_COOLDOWN_MS = Number(process.env.RATE_LIMIT_COOLDOWN_MS) || 30000;
+const ACCESS_DENIED_COOLDOWN_MS = Number(process.env.ACCESS_DENIED_COOLDOWN_MS) || 300000;
+
+function isInCooldown(model) {
+  const until = modelCooldowns.get(model);
+  return typeof until === 'number' && Date.now() < until;
+}
+
+function setCooldown(model, ms) {
+  modelCooldowns.set(model, Date.now() + ms);
+}
+
 async function callWithFallback(baseRequest, models, enableThinking, clientReasoningEffort, hasTools) {
   let lastError = null;
   const timeoutMs = resolveEffectiveThinking(enableThinking, clientReasoningEffort)
     ? REASONING_REQUEST_TIMEOUT_MS
     : REQUEST_TIMEOUT_MS;
 
-  for (const model of models) {
+  // Skip models currently in cooldown from a recent 403/429. If that would
+  // empty the chain entirely (e.g. everything's temporarily rate limited),
+  // fall back to the original full list rather than failing outright — a
+  // stale cooldown shouldn't be worse than never having tried.
+  const activeModels = models.filter(m => !isInCooldown(m));
+  const attemptOrder = activeModels.length > 0 ? activeModels : models;
+
+  for (const model of attemptOrder) {
     const reasoningPayload = getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools);
     const fullRequest = { ...baseRequest, model, ...reasoningPayload };
 
@@ -307,8 +348,8 @@ async function callWithFallback(baseRequest, models, enableThinking, clientReaso
     }
 
     try {
-      const res = await axios.post(
-        `${NIM_API_BASE}/chat/completions`,
+      const res = await nim.post(
+        '/chat/completions',
         fullRequest,
         {
           headers: {
@@ -322,9 +363,11 @@ async function callWithFallback(baseRequest, models, enableThinking, clientReaso
       return { response: res, model };
     } catch (err) {
       lastError = err;
+      const status = err.response?.status;
+
       console.warn(
         `[FALLBACK] Model failed: ${model}`,
-        err.response?.status,
+        status,
         err.response?.data?.error?.message || err.message
       );
       // Full request body + full upstream error, not just the one-line
@@ -332,6 +375,28 @@ async function callWithFallback(baseRequest, models, enableThinking, clientReaso
       if (DEBUG_MODE) {
         console.log(`[DEBUG] Full request body sent to ${model}:`, JSON.stringify(fullRequest));
         console.log(`[DEBUG] Full upstream error response:`, JSON.stringify(err.response?.data || null));
+      }
+
+      // Every model attempt uses the same NIM_API_KEY, so a 401 here means
+      // the key itself is invalid — every remaining model is guaranteed to
+      // fail the same way. Abort the whole chain immediately instead of
+      // paying out the timeout on each one in turn.
+      if (status === 401) {
+        throw err;
+      }
+
+      // 403 usually means this specific model needs an access tier the
+      // current key doesn't have, not that the key is dead outright —
+      // cooldown just this model and keep going through the chain.
+      if (status === 403) {
+        setCooldown(model, ACCESS_DENIED_COOLDOWN_MS);
+      }
+
+      // 429: this model specifically is rate limited right now. Short
+      // cooldown so the next several requests skip past it during the
+      // limited window instead of each eating a failed attempt.
+      if (status === 429) {
+        setCooldown(model, RATE_LIMIT_COOLDOWN_MS);
       }
     }
   }
