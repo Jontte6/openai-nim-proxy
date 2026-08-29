@@ -62,41 +62,64 @@ validateConfig();
 
 // ─── Model Mapping ─────────────────────────────────────────────────────────
 
+// [FIX 2026-08-29] Confirmed live vs dead against a real GET /v1/models pull
+// on this date. A bunch of these aliases pointed at backends NVIDIA had
+// already dropped from the catalog — which meant every request that needed
+// to fall back (or that hit an unmapped alias and landed on DEFAULT_MODEL)
+// was burning multiple failed attempts against models that flat-out don't
+// exist anymore before ever reaching a live one. That dead-attempt tax,
+// stacked on top of NIM's own reasoning-model latency, is what was actually
+// causing requests to crawl. Each swapped line below notes what it replaced.
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-3.5': 'qwen/qwen3.5-397b-a17b',
-  'gpt-4-turbo': 'moonshotai/kimi-k3', // was kimi-k2.6 — NVIDIA pulled it from the NIM catalog (2026-08-27), kimi-k3 is its replacement
+  'gpt-3.5': 'nvidia/nemotron-3-nano-30b-a3b', // was qwen/qwen3.5-397b-a17b — pulled from catalog
+  'gpt-4-turbo': 'moonshotai/kimi-k3', // NOTE: kimi-k2.6 showed back up as live in the 2026-08-29 catalog pull, despite the old note below saying NVIDIA pulled it. Worth double-checking build.nvidia.com yourself before deciding whether to switch back — didn't want to silently flip this on you.
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'gemini-turbo': 'meta/llama-3.3-70b-instruct',
-  'gemini-turbo?': 'abacusai/dracarys-llama-3.1-70b-instruct',
-  'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
+  'gemini-pro': 'nvidia/llama-3.1-nemotron-70b-instruct', // was nvidia/llama-3.3-nemotron-super-49b-v1.5 — pulled from catalog
+  'gemini-turbo': 'nvidia/llama3-chatqa-1.5-70b', // was meta/llama-3.3-70b-instruct — pulled from catalog
+  'gpt-3.5o': 'google/gemma-2b', // was nvidia/nemotron-mini-4b-instruct — pulled from catalog
   'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
   'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
-  'mistral': 'mistralai/mistral-large-3-675b-instruct-2512',
-  'mistral-turbo': 'mistralai/mistral-medium-3.5-128b',
-  'mistral-pro': 'mistralai/mistral-small-4-119b-2603',
+  'mistral': 'mistralai/mistral-large-2-instruct', // was mistralai/mistral-large-3-675b-instruct-2512 — pulled from catalog
+  'mistral-turbo': 'nv-mistralai/mistral-nemo-12b-instruct', // was mistralai/mistral-medium-3.5-128b — pulled from catalog
+  'mistral-pro': 'mistralai/mistral-7b-instruct-v0.3', // was mistralai/mistral-small-4-119b-2603 — pulled from catalog
   'mistral-nemo': 'mistralai/mistral-nemotron',
-  'mistral-fast': 'mistralai/ministral-14b-instruct-2512',
+  'mistral-fast': 'nvidia/mistral-nemo-minitron-8b-8k-instruct', // was mistralai/ministral-14b-instruct-2512 — pulled from catalog
   'google-light': 'google/gemma-4-31b-it',
-  'google-lightest': 'google/gemma-2-2b-it',
-  'google-lighter': 'google/gemma-3n-e4b-it',
-  'm2.7': 'minimaxai/minimax-m2.7',
-  'm3': 'minimaxai/minimax-m3',
-  'step-3.5-flash': 'stepfun-ai/step-3.5-flash',
-  'step-3.7-flash': 'stepfun-ai/step-3.7-flash'
+  'google-lightest': 'google/gemma-2b', // was google/gemma-2-2b-it — pulled from catalog (naming changed too, no "-it" variant of gemma-2 live anymore)
+  'google-lighter': 'google/gemma-3-4b-it', // was google/gemma-3n-e4b-it — pulled from catalog
+  'm3': 'minimaxai/minimax-m3'
+  // Removed 'gemini-turbo?': that stray key (note the literal "?") mapped to
+  // abacusai/dracarys-llama-3.1-70b-instruct, which is also dead now. Looked
+  // like an accidental duplicate/test entry rather than something a client
+  // would ever intentionally request — add it back with a real backend if
+  // it was actually load-bearing.
+  //
+  // Removed 'm2.7': minimaxai/minimax-m2.7 is dead, and 'm3' already covers
+  // the only live MiniMax model, so this alias had no live backend left to
+  // fall back to on its own.
+  //
+  // Removed 'step-3.5-flash' / 'step-3.7-flash': stepfun-ai has ZERO models
+  // in the live catalog as of this check, not just these two IDs — there's
+  // no live stepfun equivalent to swap in. If you still want a stepfun
+  // alias, you'll need to pick a different backend model for it manually.
 };
 
 // Default model used when an unrecognized alias is requested.
-const DEFAULT_MODEL = 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+const DEFAULT_MODEL = 'google/gemma-4-31b-it'; // [FIX 2026-08-29] was nvidia/llama-3.3-nemotron-super-49b-v1.5 — dead. Every unmapped-alias request was silently eating a guaranteed-fail attempt against a nonexistent model before falling through to FALLBACK_MODELS.
 
 const FALLBACK_MODELS = [
-  'mistralai/mistral-medium-3.5-128b',
-  'mistralai/mistral-small-4-119b-2603',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'google/gemma-4-31b-it'
+  // [FIX 2026-08-29] 3 of these 4 were dead (mistral-medium-3.5-128b,
+  // mistral-small-4-119b-2603, llama-3.3-nemotron-super-49b-v1.5) — meaning
+  // almost every fallback-triggering request had to fail 3 times against
+  // models that don't exist before ever reaching the one that worked
+  // (gemma-4-31b-it). That was the main source of the "hella slow" symptom.
+  'google/gemma-4-31b-it',
+  'openai/gpt-oss-20b',
+  'mistralai/mistral-nemotron',
+  'nvidia/nemotron-3-super-120b-a12b'
 ];
 
 // ─── Middleware ─────────────────────────────────────────────────────────────
