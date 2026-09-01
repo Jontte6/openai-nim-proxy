@@ -31,7 +31,7 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `gpt-4` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
 | `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash-0731` | Fast, non-edgy RP | Fast | High |
 | `gpt-4o` | `deepseek-ai/deepseek-v4-pro-0813` | Coding | Slow | High |
-| `gpt-3.5o` | `google/gemma-4-31b-it` | Lightweight RP, fast responses | Fast | Low-Medium |
+| `gpt-3.5o` | `nvidia/nemotron-3.5-lightning-30b-a3b` | General chat, fast lightweight tasks | Very Fast | Low-Medium |
 | `gemini-pro` | `nvidia/llama-3.1-nemotron-70b-instruct` | Daily driver, low latency | Fast | Low |
 | `gemini-turbo` | `nvidia/llama3-chatqa-1.5-70b` | Fast general purpose | Fast | Low-Medium |
 | `mistral` | `mistralai/mistral-large-2-instruct` | Best quality, unfiltered | Slow | Low |
@@ -44,8 +44,8 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
 | `gpt-3.5` | `nvidia/nemotron-3-nano-30b-a3b` | Nvidia nano fallback | Fast | Low |
 | `google-light` | `google/gemma-4-31b-it` | Short scenes, fast | Fast | Low-Medium |
-| `google-lighter` | `google/gemma-4-31b-it` | Mostly testing only | Fast | Low-Medium |
-| `google-lightest` | `google/gemma-4-31b-it` | Testing only | Fast | Low |
+| `google-lighter` | `poolside/laguna-xs-2.1` | Coding | Fast | Unknown (to me) |
+| `google-lightest` | `meta/muse-glimmer-30b` | Coding & Agentic work | Fast | Unknown (to me) |
 | `m3` | `minimaxai/minimax-m3` | Experimental | Medium-High | Unknown (to me) |
 
 ### Filter Guide
@@ -53,7 +53,7 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 | If your use-case involves... | Avoid | Use instead |
 |---|---|---|
 | Dark themes, violence, mature content | `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
-| Fast responses needed | `mistral` (675B) | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
+| Fast responses needed | `gpt-4o`, `gpt-4-turbo` | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
 | Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4` |
 | Testing / very fast replies | — | `google-lightest`, `gpt-3.5o` |
 | Coding / Long horizon work | — | `gpt-4-turbo`, `gpt-4o` |
@@ -106,7 +106,7 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 | Problem | Likely Cause | Fix |
 |---|---|---|
 | "All models failed" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
-| Very slow responses | Using `mistral` (675B) or Chinese models during peak hours | Switch to `gemini-pro`, `mistral-turbo`, or `gpt-3.5o` |
+| Very slow responses | Using `gpt-4o`, `gpt-4-turbo`, or other Chinese-hosted models during peak hours | Switch to `gemini-pro`, `mistral-turbo`, or `gpt-3.5o` |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use `mistral`, `gemini-pro`, or `claude-3-opus` |
 | 404 on `/v1/chat/completions` | Auth mismatch | Verify `CLIENT_AUTH_KEY` matches between Railway and client |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |
