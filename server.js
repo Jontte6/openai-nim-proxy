@@ -1,342 +1,130 @@
-// server.js — Robust Hybrid OpenAI ↔ NIM Proxy
-// Express 5 Compatible
-// Fixes: auth bypass, startup DDoS, silent stream failures, memory leaks, Express 5 deprecations
-// Consolidated Reasoning Subsystem
-//
-// === REASONING PAYLOAD FIXES (this revision) ===
-// 1. Removed the `extra_body: {...}` wrapper from getReasoningPayload(). That key only means
-//    anything inside the official openai-python/node SDK, where it gets unwrapped client-side
-//    and merged into the outgoing JSON as top-level fields. This proxy uses raw axios, so
-//    sending a literal `"extra_body"` key was dead weight — NIM never saw chat_template_kwargs,
-//    reasoning_effort, or anything else nested under it. Confirmed against NVIDIA's own curl
-//    docs, which send chat_template_kwargs directly at the top level.
-// 2. GLM-5.2 previously only ever set `reasoning_effort`, which controls thinking *intensity*,
-//    not whether thinking happens at all. GLM-5.2 thinks by default. The real switch is a
-//    top-level `thinking: { type: "enabled" | "disabled" }` field (per z.ai's own docs). Added.
-// 3. nemotron-3-ultra's `force_nonempty_content` flag is NOT a confirmed NVIDIA parameter —
-//    left in as opt-in/best-effort since unrecognized chat_template_kwargs are typically just
-//    ignored by the backend rather than causing a hard failure, but flagged here so you know
-//    it's unverified if you ever go looking for why something isn't behaving.
-//
-// === REASONING OUTPUT FORMAT FIX (this revision) ===
-// 4. Fixed reasoning leaking into message content for clients that don't parse `<thinking>` tags.
-//    Default behavior is now clean `content` + structured `reasoning`/`reasoning_content` fields.
-//    GoonChat (or any legacy client that expects inline tags) can opt-in by sending the
-//    `x-reasoning-format: inline` header.
+// server.js — OpenAI-compatible proxy for NVIDIA NIM
+// Reasoning payload logic: reasoning.js. Tool-call leak recovery: tools.js.
 
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const https = require('https');
 const { StringDecoder } = require('string_decoder');
 const { timingSafeEqual } = require('crypto');
+const { SHOW_REASONING, getReasoningPayload, resolveEffectiveThinking, StreamNormalizer, normalizeNonStreamChoice } = require('./reasoning');
+const { extractLeakedToolCalls, ToolCallStreamRecovery } = require('./tools');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── Configuration ───────────────────────────────────────────────────────────
+// ─── Configuration ──────────────────────────────────────────────────────
 
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 const CLIENT_AUTH_KEY = process.env.CLIENT_AUTH_KEY;
-
-const SHOW_REASONING = process.env.SHOW_REASONING === 'true';
 const ENABLE_THINKING_MODE = process.env.ENABLE_THINKING_MODE === 'true';
 const SKIP_VALIDATION = process.env.SKIP_VALIDATION === 'true';
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
+// Verbose logging: reasoning payload per fallback attempt, full request/error bodies on failure.
+const DEBUG_MODE = process.env.DEBUG_MODE === 'true';
+
 const MAX_TOKENS_LIMIT = 65536;
-const REQUEST_TIMEOUT_MS = 180000;
+
+// Shared keep-alive agent for connection reuse on long-lived deployments.
+const keepAliveAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 50,
+  maxFreeSockets: 10
+});
+
+const nim = axios.create({
+  baseURL: NIM_API_BASE,
+  httpsAgent: keepAliveAgent
+});
+
+// Per-attempt timeout before falling back to the next model. Reasoning
+// models get a longer window since thinking delays first-token latency.
+// Check these against your platform's own request duration limit.
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS) || 180000;
+const REASONING_REQUEST_TIMEOUT_MS = Number(process.env.REASONING_REQUEST_TIMEOUT_MS) || 480000;
 const VALIDATION_TIMEOUT_MS = 15000;
 const MAX_BUFFER_SIZE = 1024 * 1024; // 1MB
 
-if (SHOW_REASONING) console.log('[CONFIG] Reasoning display: ENABLED');
 if (ENABLE_THINKING_MODE) console.log('[CONFIG] Thinking mode: ENABLED');
+if (DEBUG_MODE) console.log('[CONFIG] Debug mode: ENABLED (verbose reasoning + fallback logging)');
 
-// ─── Config validation ──────────────────────────────────────────────────────
+// ─── Config validation ──────────────────────────────────────────────────
 
 function validateConfig() {
   const fatal = (msg) => { console.error(`[FATAL] ${msg}`); process.exit(1); };
-
   if (!NIM_API_KEY) fatal('NIM_API_KEY is required. Get one at https://build.nvidia.com/');
-
   if (!CLIENT_AUTH_KEY) {
     console.warn('[WARN] CLIENT_AUTH_KEY not set. All requests will be rejected with 403.');
   }
 }
-
 validateConfig();
 
-// ─── Model Mapping ─────────────────────────────────────────────────────────
+// ─── Model Mapping ───────────────────────────────────────────────────────
 
+// Aliases are periodically re-checked against NIM's live catalog (see
+// validateModels() and GET /v1/models?live=true). Comments note the prior
+// backend model ID where an entry was swapped out for a dead catalog entry.
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/nemotron-3-super-120b-a12b',
   'gpt-4': 'nvidia/nemotron-3-ultra-550b-a55b',
-  'gpt-3.5': 'qwen/qwen3.5-397b-a17b',
-  'gpt-4-turbo': 'moonshotai/kimi-k2.6',
-  'gpt-4o': 'deepseek-ai/deepseek-v4-pro',
+  'gpt-3.5': 'nvidia/nemotron-3-nano-30b-a3b', // was qwen/qwen3.5-397b-a17b
+  'gpt-4-turbo': 'moonshotai/kimi-k3',
   'claude-3-opus': 'openai/gpt-oss-120b',
   'claude-3-sonnet': 'openai/gpt-oss-20b',
-  'gemini-pro': 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'gemini-turbo': 'meta/llama-3.3-70b-instruct',
-  'gemini-turbo?': 'abacusai/dracarys-llama-3.1-70b-instruct',
-  'gpt-3.5o': 'nvidia/nemotron-mini-4b-instruct',
-  'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash',
-  'glm-5.2': 'z-ai/glm-5.2',
-  'mistral': 'mistralai/mistral-large-3-675b-instruct-2512',
-  'mistral-turbo': 'mistralai/mistral-medium-3.5-128b',
-  'mistral-pro': 'mistralai/mistral-small-4-119b-2603',
+  'gemini-pro': 'nvidia/llama-3.1-nemotron-70b-instruct', // was nvidia/llama-3.3-nemotron-super-49b-v1.5
+  'gemini-turbo': 'nvidia/llama3-chatqa-1.5-70b', // was meta/llama-3.3-70b-instruct
+  'gpt-3.5o': 'nvidia/nemotron-3.5-lightning-30b-a3b', // was google/gemma-2b
+  'gpt-4-flash': 'deepseek-ai/deepseek-v4-flash-0731',
+  'gpt-4o': 'deepseek-ai/deepseek-v4-pro-0813',
+  'mistral': 'mistralai/mistral-large-2-instruct', // was mistralai/mistral-large-3-675b-instruct-2512
+  'mistral-turbo': 'nv-mistralai/mistral-nemo-12b-instruct', // was mistralai/mistral-medium-3.5-128b
+  'mistral-pro': 'mistralai/mistral-7b-instruct-v0.3', // was mistralai/mistral-small-4-119b-2603
   'mistral-nemo': 'mistralai/mistral-nemotron',
-  'mistral-fast': 'mistralai/ministral-14b-instruct-2512',
+  'mistral-fast': 'nvidia/mistral-nemo-minitron-8b-8k-instruct', // was mistralai/ministral-14b-instruct-2512
   'google-light': 'google/gemma-4-31b-it',
-  'google-lightest': 'google/gemma-2-2b-it',
-  'google-lighter': 'google/gemma-3n-e4b-it',
-  'm2.7': 'minimaxai/minimax-m2.7',
-  'm3': 'minimaxai/minimax-m3',
-  'step-3.5-flash': 'stepfun-ai/step-3.5-flash',
-  'step-3.7-flash': 'stepfun-ai/step-3.7-flash'
+  'google-lightest': 'meta/muse-glimmer-30b', // was google/gemma-2b
+  'google-lighter': 'poolside/laguna-xs-2.1', // was google/gemma-3-4b-it
+  'm3': 'minimaxai/minimax-m3'
 };
 
+// Used when an unrecognized alias is requested. Must point at a live model.
+const DEFAULT_MODEL = 'google/gemma-4-31b-it';
+
+// Ordered by observed reliability/speed — an early failing model delays every fallback behind it.
 const FALLBACK_MODELS = [
-  'mistralai/mistral-medium-3.5-128b',
-  'mistralai/mistral-small-4-119b-2603',
-  'nvidia/llama-3.3-nemotron-super-49b-v1.5',
-  'google/gemma-4-31b-it'
+  'openai/gpt-oss-20b',
+  'google/gemma-4-31b-it',
+  'mistralai/mistral-nemotron',
+  'nvidia/nemotron-3-super-120b-a12b'
 ];
 
-// ─── Reasoning Subsystem ─────────────────────────────────────────────────────
-// Pure, stateful string parser for extracting reasoning blocks across chunks.
-
-class DelimiterParser {
-  constructor(openTag, closeTag) {
-    this.openTag = openTag;
-    this.closeTag = closeTag;
-    this.inThinking = false;
-    this.buffer = '';
-  }
-
-  processChunk(chunk) {
-    this.buffer += chunk;
-    let content = '';
-    let reasoning = '';
-
-    while (true) {
-      const targetTag = this.inThinking ? this.closeTag : this.openTag;
-      const tagIndex = this.buffer.indexOf(targetTag);
-
-      if (tagIndex !== -1) {
-        const textBefore = this.buffer.substring(0, tagIndex);
-        if (this.inThinking) {
-          reasoning += textBefore;
-        } else {
-          content += textBefore;
-        }
-        this.inThinking = !this.inThinking;
-        this.buffer = this.buffer.substring(tagIndex + targetTag.length);
-      } else {
-        // Check for partial tag at the end
-        let partialLen = 0;
-        const maxLen = Math.min(this.buffer.length, targetTag.length - 1);
-        for (let i = maxLen; i > 0; i--) {
-          if (targetTag.startsWith(this.buffer.substring(this.buffer.length - i))) {
-            partialLen = i;
-            break;
-          }
-        }
-
-        const textBefore = this.buffer.substring(0, this.buffer.length - partialLen);
-        if (this.inThinking) {
-          reasoning += textBefore;
-        } else {
-          content += textBefore;
-        }
-        this.buffer = this.buffer.substring(this.buffer.length - partialLen);
-        break;
-      }
-    }
-    return { content, reasoning };
-  }
-
-  flush() {
-    let content = '';
-    let reasoning = '';
-    if (this.buffer) {
-      if (this.inThinking) {
-        reasoning += this.buffer;
-      } else {
-        content += this.buffer;
-      }
-      this.buffer = '';
-    }
-    return { content, reasoning };
-  }
-}
-
-// Normalizes structured reasoning fields and extracts content delimiters.
-class StreamNormalizer {
-  constructor(model) {
-    this.model = model;
-    this.parser = null;
-
-    // ONLY use content delimiters for models that embed reasoning in content
-    if (model === 'qwen/qwen3.5-397b-a17b' || model === 'nvidia/llama-3.3-nemotron-super-49b-v1.5') {
-      this.parser = new DelimiterParser('<think>', '</think>');
-    }
-    // Models like Gemma 4, DeepSeek, GPT-OSS use structured fields and are NOT parsed here.
-  }
-
-  processDelta(delta) {
-    const normalizedDelta = { ...delta };
-    let reasoning = normalizedDelta.reasoning || normalizedDelta.reasoning_content || '';
-    let content = normalizedDelta.content || '';
-
-    // Priority: Structured reasoning > Content delimiters
-    if (!reasoning && content && this.parser) {
-      const parsed = this.parser.processChunk(content);
-      reasoning = parsed.reasoning;
-      content = parsed.content;
-    }
-
-    if (content) normalizedDelta.content = content;
-    else delete normalizedDelta.content;
-
-    if (reasoning) normalizedDelta.reasoning = reasoning;
-    else delete normalizedDelta.reasoning;
-
-    delete normalizedDelta.reasoning_content;
-    return normalizedDelta;
-  }
-
-  flush() {
-    if (!this.parser) return { content: '', reasoning: '' };
-    return this.parser.flush();
-  }
-}
-
-function normalizeNonStreamChoice(choice, model) {
-  if (!choice) return choice;
-
-  const message = choice.message || {};
-  let reasoning = message.reasoning || message.reasoning_content || '';
-  let content = message.content || '';
-
-  if (!reasoning && content) {
-    let parser = null;
-    if (model === 'qwen/qwen3.5-397b-a17b' || model === 'nvidia/llama-3.3-nemotron-super-49b-v1.5') {
-      parser = new DelimiterParser('<think>', '</think>');
-    }
-
-    if (parser) {
-      const parsed = parser.processChunk(content);
-      const flushed = parser.flush();
-      content = (parsed.content || '') + (flushed.content || '');
-      reasoning = (parsed.reasoning || '') + (flushed.reasoning || '');
-    }
-  }
-
-  const newMessage = { ...message };
-  if (content) newMessage.content = content;
-  if (reasoning) newMessage.reasoning = reasoning;
-  delete newMessage.reasoning_content;
-
-  return { ...choice, message: newMessage };
-}
-
-// Pure function returning model-specific reasoning request payloads.
-// IMPORTANT: everything returned here gets spread DIRECTLY into the top-level
-// JSON body sent to NIM via axios. Do NOT wrap anything in an `extra_body` key —
-// that's an openai-SDK-only convention this proxy doesn't use, and NIM's raw
-// REST endpoint will just silently ignore a field called "extra_body".
-function getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools) {
-  const effort = clientReasoningEffort;
-
-  switch (model) {
-    case 'nvidia/nemotron-3-super-120b-a12b': {
-      if (!enableThinking) return {};
-      return { chat_template_kwargs: { enable_thinking: true } };
-    }
-
-    case 'nvidia/nemotron-3-ultra-550b-a55b': {
-      if (!enableThinking) return {};
-      const payload = { chat_template_kwargs: { enable_thinking: true } };
-      // Unverified param — see header comment. Left as opt-in best-effort.
-      if (hasTools) payload.chat_template_kwargs.force_nonempty_content = true;
-      return payload;
-    }
-
-    case 'qwen/qwen3.5-397b-a17b': {
-      // Model appears to default to thinking-on in its chat template. Only send
-      // a field when the caller explicitly wants thinking OFF; otherwise let the
-      // <think> delimiter parser handle whatever the model does natively.
-      if (enableThinking) return {};
-      return { chat_template_kwargs: { enable_thinking: false } };
-    }
-
-    case 'deepseek-ai/deepseek-v4-pro':
-    case 'deepseek-ai/deepseek-v4-flash': {
-      if (!enableThinking) return {};
-      const payload = { chat_template_kwargs: { thinking: true } };
-      if (effort) payload.chat_template_kwargs.reasoning_effort = effort;
-      return payload;
-    }
-
-    case 'openai/gpt-oss-120b':
-    case 'openai/gpt-oss-20b': {
-      if (effort && ['low', 'medium', 'high'].includes(effort)) {
-        return { reasoning_effort: effort };
-      }
-      if (enableThinking) return { reasoning_effort: 'high' };
-      return {};
-    }
-
-    case 'mistralai/mistral-medium-3.5-128b':
-    case 'mistralai/mistral-small-4-119b-2603': {
-      if (effort && ['high', 'none'].includes(effort)) {
-        return { reasoning_effort: effort };
-      }
-      if (enableThinking) return { reasoning_effort: 'high' };
-      return {};
-    }
-
-    case 'z-ai/glm-5.2': {
-      // FIX: GLM-5.2 thinks by default. `reasoning_effort` only controls
-      // intensity (max vs high) once thinking is already happening — it does
-      // NOT turn thinking off. The actual on/off switch is `thinking.type`.
-      // Without this, GLM-5.2 was silently reasoning on every single request
-      // regardless of ENABLE_THINKING_MODE.
-      const payload = {
-        thinking: { type: enableThinking ? 'enabled' : 'disabled' }
-      };
-      if (enableThinking && effort) payload.reasoning_effort = effort;
-      return payload;
-    }
-
-    case 'google/gemma-4-31b-it': {
-      if (!enableThinking) return {};
-      return { chat_template_kwargs: { enable_thinking: true } };
-    }
-
-    case 'stepfun-ai/step-3.7-flash': {
-      if (enableThinking) return {};
-      return { chat_template_kwargs: { thinking: false } };
-    }
-
-    default:
-      // Default reasoning models (Kimi, MiniMax, etc.) or non-reasoning models
-      return {};
-  }
-}
-
-// ─── Middleware ─────────────────────────────────────────────────────────────
+// ─── Middleware ─────────────────────────────────────────────────────────
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
 
-// FIX: Extract token AFTER "Bearer " prefix, compare only the token
+// Malformed JSON body -> clean OpenAI-style error instead of Express's default HTML error page.
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: {
+        message: 'Invalid JSON in request body',
+        type: 'invalid_request_error',
+        code: 400
+      }
+    });
+  }
+  next(err);
+});
+
 function extractBearerToken(authHeader) {
   if (!authHeader || typeof authHeader !== 'string') return null;
-  const parts = authHeader.trim().split(' ');
-  if (parts.length !== 2 || parts[0] !== 'Bearer') return null;
-  return parts[1];
+  const trimmed = authHeader.trim();
+  if (!trimmed.startsWith('Bearer ')) return null;
+  const token = trimmed.slice('Bearer '.length).trim();
+  return token || null;
 }
 
 function safeTimingEqual(a, b) {
@@ -349,12 +137,11 @@ function safeTimingEqual(a, b) {
 }
 
 app.use((req, res, next) => {
-  if (req.path === '/health' || req.path === '/v1/models') {
+  if (req.path === '/health' || req.path === '/v1/models' || req.path === '/') {
     return next();
   }
 
   const token = extractBearerToken(req.headers.authorization);
-
   if (!token || !CLIENT_AUTH_KEY) {
     return res.status(403).json({
       error: {
@@ -378,7 +165,20 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Validation ─────────────────────────────────────────────────────────────
+// ─── Validation ─────────────────────────────────────────────────────────
+
+// Shared by startup validateModels() and GET /v1/models?live=true.
+async function fetchLiveModelIds() {
+  const response = await nim.get('/models', {
+    headers: {
+      Authorization: `Bearer ${NIM_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: VALIDATION_TIMEOUT_MS
+  });
+
+  return new Set((response.data.data || []).map(m => m.id));
+}
 
 async function validateModels() {
   if (SKIP_VALIDATION) {
@@ -387,22 +187,10 @@ async function validateModels() {
   }
 
   console.log('[VALIDATION] Checking model availability via /v1/models...');
-
   try {
-    const response = await axios.get(`${NIM_API_BASE}/models`, {
-      headers: {
-        Authorization: `Bearer ${NIM_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: VALIDATION_TIMEOUT_MS
-    });
-
-    const availableModels = new Set(
-      (response.data.data || []).map(m => m.id)
-    );
+    const availableModels = await fetchLiveModelIds();
 
     const invalid = [];
-
     for (const [alias, nimId] of Object.entries(MODEL_MAPPING)) {
       if (availableModels.has(nimId)) {
         console.log(`[VALIDATION] ✓ ${alias} → ${nimId}`);
@@ -417,10 +205,9 @@ async function validateModels() {
     } else {
       console.log('[VALIDATION] All models valid.');
     }
-
   } catch (err) {
     console.warn(`[VALIDATION] /v1/models endpoint failed: ${err.message}. Skipping validation.`);
-    console.warn('[VALIDATION] Consider setting SKIP_VALIDATION=true if your NIM provider lacks a model listing endpoint.');
+    console.warn('[VALIDATION] Set SKIP_VALIDATION=true if your NIM provider lacks a model listing endpoint.');
   }
 }
 
@@ -450,7 +237,7 @@ async function sendDiscordAlert(invalidModels) {
   }
 }
 
-// ─── Helper: Safe Stream Writing ───────────────────────────────────────────
+// ─── Helper: Safe Stream Writing ─────────────────────────────────────────
 
 function safeWrite(res, data) {
   try {
@@ -464,59 +251,182 @@ function safeWrite(res, data) {
   return false;
 }
 
-// ─── Helper: Fallback Chain ─────────────────────────────────────────────────
+// ─── Helper: Fallback Chain ──────────────────────────────────────────────
+
+// Per-model cooldown after a 403/429, in-memory (resets on restart, not shared across instances).
+const modelCooldowns = new Map(); // model -> timestamp (ms) until which to skip it
+
+const RATE_LIMIT_COOLDOWN_MS = Number(process.env.RATE_LIMIT_COOLDOWN_MS) || 30000;
+const ACCESS_DENIED_COOLDOWN_MS = Number(process.env.ACCESS_DENIED_COOLDOWN_MS) || 300000;
+
+function isInCooldown(model) {
+  const until = modelCooldowns.get(model);
+  return typeof until === 'number' && Date.now() < until;
+}
+
+function setCooldown(model, ms) {
+  modelCooldowns.set(model, Date.now() + ms);
+}
 
 async function callWithFallback(baseRequest, models, enableThinking, clientReasoningEffort, hasTools) {
   let lastError = null;
+  const timeoutMs = resolveEffectiveThinking(enableThinking, clientReasoningEffort)
+    ? REASONING_REQUEST_TIMEOUT_MS
+    : REQUEST_TIMEOUT_MS;
 
-  for (const model of models) {
+  // Skip cooling-down models; fall back to the full list if that empties the chain.
+  const activeModels = models.filter(m => !isInCooldown(m));
+  const attemptOrder = activeModels.length > 0 ? activeModels : models;
+
+  for (const model of attemptOrder) {
+    const reasoningPayload = getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools);
+    const fullRequest = { ...baseRequest, model, ...reasoningPayload };
+
+    if (DEBUG_MODE) {
+      console.log(`[DEBUG] Attempting ${model} with reasoning payload:`, JSON.stringify(reasoningPayload), `(timeout: ${timeoutMs}ms)`);
+    }
+
     try {
-      const reasoningPayload = getReasoningPayload(model, enableThinking, clientReasoningEffort, hasTools);
-
-      const res = await axios.post(
-        `${NIM_API_BASE}/chat/completions`,
-        { ...baseRequest, model, ...reasoningPayload },
+      const res = await nim.post(
+        '/chat/completions',
+        fullRequest,
         {
           headers: {
             Authorization: `Bearer ${NIM_API_KEY}`,
             'Content-Type': 'application/json'
           },
           responseType: baseRequest.stream ? 'stream' : 'json',
-          timeout: REQUEST_TIMEOUT_MS
+          timeout: timeoutMs
         }
       );
-
       return { response: res, model };
-
     } catch (err) {
       lastError = err;
+      const status = err.response?.status;
+
       console.warn(
         `[FALLBACK] Model failed: ${model}`,
-        err.response?.status,
+        status,
         err.response?.data?.error?.message || err.message
       );
+      if (DEBUG_MODE) {
+        console.log(`[DEBUG] Full request body sent to ${model}:`, JSON.stringify(fullRequest));
+        console.log(`[DEBUG] Full upstream error response:`, JSON.stringify(err.response?.data || null));
+      }
+
+      // Same key for every attempt: a 401 means every remaining model would fail identically.
+      if (status === 401) {
+        throw err;
+      }
+
+      // 403: likely an access-tier issue, not a dead key — cooldown just this model.
+      if (status === 403) {
+        setCooldown(model, ACCESS_DENIED_COOLDOWN_MS);
+      }
+
+      // 429: rate limited — short cooldown.
+      if (status === 429) {
+        setCooldown(model, RATE_LIMIT_COOLDOWN_MS);
+      }
     }
   }
 
   throw lastError || new Error('All models failed');
 }
 
-// ─── Routes ────────────────────────────────────────────────────────────────
+// ─── Routes ───────────────────────────────────────────────────────────────
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', version: '2.2.0' });
+// Prevents a bare 403 (from the auth middleware) on root URL hits from a browser.
+app.get('/', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nim-to-openai-proxy</title>
+<style>
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0b0f14;
+    color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    text-align: center;
+    padding: 24px;
+  }
+  .card { max-width: 480px; }
+  h1 { font-size: 1.3rem; margin: 0 0 0.75rem; }
+  p { color: #9aa7b2; line-height: 1.55; margin: 0.5rem 0; }
+  code { background: #161b22; padding: 2px 6px; border-radius: 4px; color: #7ee787; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" style="margin: 0 auto 14px; display: block;">
+      <circle cx="12" cy="12" r="11" stroke="#7ee787" stroke-width="1.5"/>
+      <path d="M7 12.5l3 3 6-6.5" stroke="#7ee787" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <h1>it's up.</h1>
+    <p>this proxies OpenAI-format chat requests to NVIDIA NIM. point any OpenAI-compatible client at it, pick a model with a plain alias (<code>gpt-4</code>, <code>mistral</code>, etc), and it handles model fallback, streaming, and each backend's own reasoning/thinking quirks for you.</p>
+    <p>it's an API, not a website: nothing lives at this root path.</p>
+    <p>send requests to <code>/v1/chat/completions</code> with an <code>Authorization: Bearer &lt;token&gt;</code> header.</p>
+    <p>status check, no token needed: <code>/health</code></p>
+    <p>bugs / questions: <a href="https://github.com/skywalker14017/nim-to-openai-proxy" style="color:#7ee787;">open an issue on GitHub</a> (docs are there too), or hit me up on Discord (i'll be faster there): <code>skywalker_1401</code></p>
+  </div>
+</body>
+</html>`);
 });
 
-app.get('/v1/models', (req, res) => {
-  res.json({
-    object: 'list',
-    data: Object.keys(MODEL_MAPPING).map(id => ({
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', version: '2.6.0' });
+});
+
+app.get('/v1/models', async (req, res) => {
+  if (req.query.live !== 'true') {
+    return res.json({
+      object: 'list',
+      data: Object.keys(MODEL_MAPPING).map(id => ({
+        id,
+        object: 'model',
+        created: Math.floor(Date.now() / 1000), // OpenAI spec expects Unix seconds
+        owned_by: 'nim-proxy'
+      }))
+    });
+  }
+
+  // Cross-checks every alias against NIM's live catalog on demand.
+  try {
+    const availableModels = await fetchLiveModelIds();
+    const data = Object.entries(MODEL_MAPPING).map(([id, backend]) => ({
       id,
       object: 'model',
-      created: Date.now(),
-      owned_by: 'nim-proxy'
-    }))
-  });
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'nim-proxy',
+      backend,
+      available: availableModels.has(backend)
+    }));
+
+    res.json({
+      object: 'list',
+      data,
+      live_check: {
+        checked_at: new Date().toISOString(),
+        unavailable_aliases: data.filter(m => !m.available).map(m => m.id)
+      }
+    });
+  } catch (err) {
+    console.warn(`[MODELS] Live check failed: ${err.message}`);
+    res.status(502).json({
+      error: {
+        message: `Live model check against NIM failed: ${err.message}`,
+        type: 'live_check_error',
+        code: 502
+      }
+    });
+  }
 });
 
 app.post('/v1/chat/completions', async (req, res) => {
@@ -524,19 +434,23 @@ app.post('/v1/chat/completions', async (req, res) => {
   let upstreamStream = null;
 
   try {
-    const {
-      model,
-      messages,
-      temperature,
-      max_tokens,
-      stream
-    } = req.body;
+    const { model, max_tokens, temperature, stream, reasoning_effort } = req.body;
 
-    const primaryModel = MODEL_MAPPING[model] || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
-    const modelChain = [primaryModel, ...FALLBACK_MODELS];
+    let primaryModel = MODEL_MAPPING[model];
+    if (!primaryModel) {
+      console.warn(`[PROXY] Unknown model alias "${model}", falling back to default: ${DEFAULT_MODEL}`);
+      primaryModel = DEFAULT_MODEL;
+    }
+
+    // De-dupe: avoids retrying the same model twice if it's also in FALLBACK_MODELS.
+    const modelChain = [...new Set([primaryModel, ...FALLBACK_MODELS])];
+
+    // Forward all client fields except model (replaced per-attempt) and
+    // reasoning_effort (translated per-model by getReasoningPayload).
+    const { model: _droppedModel, reasoning_effort: _droppedReasoningEffort, ...forwardedFields } = req.body;
 
     const baseRequest = {
-      messages,
+      ...forwardedFields,
       temperature: temperature ?? 0.7,
       max_tokens: Math.min(max_tokens ?? 2048, MAX_TOKENS_LIMIT),
       stream: stream || false
@@ -546,13 +460,13 @@ app.post('/v1/chat/completions', async (req, res) => {
       baseRequest,
       modelChain,
       ENABLE_THINKING_MODE,
-      req.body.reasoning_effort,
+      reasoning_effort,
       !!req.body.tools
     );
+
     upstreamStream = response.data;
     console.log('[PROXY] Model used:', usedModel);
 
-    // Determine if the client wants legacy inline <thinking> tags in the content stream
     const inlineReasoning = req.headers['x-reasoning-format'] === 'inline';
 
     if (stream) {
@@ -565,8 +479,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       let reasoningOpen = false;
       let doneSent = false;
       let cleanedUp = false;
-
       const normalizer = new StreamNormalizer(usedModel);
+      const toolRecovery = new ToolCallStreamRecovery();
 
       const cleanup = () => {
         if (cleanedUp) return;
@@ -580,7 +494,9 @@ app.post('/v1/chat/completions', async (req, res) => {
       const processLine = (line) => {
         if (!line.startsWith('data: ')) return;
 
-        if (line.includes('[DONE]')) {
+        // Exact match avoids false-positiving on model output that happens
+        // to contain the literal substring "[DONE]".
+        if (line.trim() === 'data: [DONE]') {
           if (!doneSent) {
             safeWrite(res, 'data: [DONE]\n\n');
             doneSent = true;
@@ -598,7 +514,6 @@ app.post('/v1/chat/completions', async (req, res) => {
             let clientContent = '';
 
             if (SHOW_REASONING && inlineReasoning) {
-              // Legacy GoonChat behavior: bake <thinking> tags into content
               if (normalizedDelta.reasoning && !reasoningOpen) {
                 clientContent += `<thinking>\n${normalizedDelta.reasoning}`;
                 reasoningOpen = true;
@@ -613,18 +528,18 @@ app.post('/v1/chat/completions', async (req, res) => {
                 clientContent += normalizedDelta.content;
               }
             } else {
-              // Default behavior: clean content, no inline tags
               clientContent = normalizedDelta.content || '';
+            }
+
+            const { content: recoveredContent, toolCallDeltas } = toolRecovery.process(clientContent);
+            clientContent = recoveredContent;
+            if (toolCallDeltas.length > 0) {
+              delta.tool_calls = toolCallDeltas;
+              if (data.choices[0]) data.choices[0].finish_reason = 'tool_calls';
             }
 
             delta.content = clientContent;
 
-            // FIX: keep a structured reasoning field alongside the inline
-            // tags in content. GoonChat parses the inline tags;
-            // clients like Pal Chat / OpenRouter-style apps look for a
-            // separate `reasoning`/`reasoning_content` field to render their
-            // own collapsible thinking UI. Without this, those clients just
-            // see one flat content blob and never show a thinking indicator.
             if (SHOW_REASONING && normalizedDelta.reasoning) {
               delta.reasoning = normalizedDelta.reasoning;
               delta.reasoning_content = normalizedDelta.reasoning;
@@ -635,8 +550,7 @@ app.post('/v1/chat/completions', async (req, res) => {
           }
 
           safeWrite(res, `data: ${JSON.stringify(data)}\n\n`);
-
-        } catch (parseErr) {
+        } catch {
           console.warn('[STREAM] Invalid JSON line:', line.slice(0, 100));
           safeWrite(res, `data: ${JSON.stringify({
             error: {
@@ -668,7 +582,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
-
         for (const line of lines) {
           processLine(line);
         }
@@ -676,7 +589,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       upstreamStream.on('end', () => {
         buffer += decoder.end();
-
         if (buffer.trim()) {
           for (const line of buffer.split('\n')) {
             processLine(line);
@@ -684,16 +596,24 @@ app.post('/v1/chat/completions', async (req, res) => {
         }
 
         const flushedDelta = normalizer.flush();
+
+        const toolRecoveryLeftover = toolRecovery.flush();
+        if (toolRecoveryLeftover) {
+          console.warn('[TOOL_CALL_RECOVERY] Stream ended mid <tool_call> tag; flushing raw text instead of dropping it.');
+          flushedDelta.content = (flushedDelta.content || '') + toolRecoveryLeftover;
+        }
+
         if (flushedDelta.content || flushedDelta.reasoning) {
           let clientContent = '';
+
           if (SHOW_REASONING && inlineReasoning) {
-            // Legacy GoonChat behavior: bake <thinking> tags into content
             if (flushedDelta.reasoning && !reasoningOpen) {
               clientContent += `<thinking>\n${flushedDelta.reasoning}`;
               reasoningOpen = true;
             } else if (flushedDelta.reasoning) {
               clientContent += flushedDelta.reasoning;
             }
+
             if (flushedDelta.content && reasoningOpen) {
               clientContent += `\n</thinking>\n\n${flushedDelta.content}`;
               reasoningOpen = false;
@@ -701,18 +621,31 @@ app.post('/v1/chat/completions', async (req, res) => {
               clientContent += flushedDelta.content;
             }
           } else {
-            // Default behavior: clean content, no inline tags
             clientContent = flushedDelta.content || '';
           }
-          if (clientContent) {
-            safeWrite(res, `data: ${JSON.stringify({ choices: [{ delta: { content: clientContent } }] })}\n\n`);
+
+          const finalChunk = { choices: [{ delta: {} }] };
+          if (clientContent) finalChunk.choices[0].delta.content = clientContent;
+
+          if (SHOW_REASONING && !inlineReasoning && flushedDelta.reasoning) {
+            finalChunk.choices[0].delta.reasoning = flushedDelta.reasoning;
+            finalChunk.choices[0].delta.reasoning_content = flushedDelta.reasoning;
           }
+
+          if (Object.keys(finalChunk.choices[0].delta).length > 0) {
+            safeWrite(res, `data: ${JSON.stringify(finalChunk)}\n\n`);
+          }
+        }
+
+        // Close an inline <thinking> tag left open if the model was cut off mid-reasoning.
+        if (SHOW_REASONING && inlineReasoning && reasoningOpen) {
+          safeWrite(res, `data: ${JSON.stringify({ choices: [{ delta: { content: '\n</thinking>\n' } }] })}\n\n`);
+          reasoningOpen = false;
         }
 
         if (!doneSent) {
           safeWrite(res, 'data: [DONE]\n\n');
         }
-
         streamEndedCleanly = true;
         if (!res.writableEnded) {
           res.end();
@@ -722,7 +655,6 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       upstreamStream.on('error', err => {
         console.error('[STREAM] Upstream error:', err.message);
-
         if (!res.writableEnded) {
           safeWrite(res, `data: ${JSON.stringify({
             error: {
@@ -738,39 +670,45 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       req.on('close', () => {
         const clientGone = req.destroyed || !res.writable;
-
         if (!streamEndedCleanly && clientGone) {
           console.warn('[STREAM] Client disconnected prematurely');
         }
-
         if (upstreamStream && !upstreamStream.destroyed && !streamEndedCleanly) {
           upstreamStream.destroy();
         }
         cleanup();
       });
-
     } else {
-      // Non-streaming response
       const openaiResponse = {
         id: `chatcmpl-${Date.now()}`,
         object: 'chat.completion',
+        model: usedModel, // actual model that answered, may differ from the requested alias
         created: Math.floor(Date.now() / 1000),
-        model: model,
         choices: (response.data.choices || []).map((choice, i) => {
           const normalizedChoice = normalizeNonStreamChoice(choice, usedModel);
           let content = normalizedChoice.message?.content || '';
           const reasoning = normalizedChoice.message?.reasoning || '';
 
+          const { content: cleanedContent, toolCalls: recoveredToolCalls } = extractLeakedToolCalls(content);
+          content = cleanedContent;
+
           if (SHOW_REASONING && inlineReasoning && reasoning) {
-            // Legacy GoonChat behavior: bake <thinking> tags into content
             content = `<thinking>\n${reasoning}\n</thinking>\n\n${content}`;
           }
 
           const finalMessage = { ...normalizedChoice.message, content };
 
-          // Same fix as the streaming path: keep the structured field
-          // alongside the inline tags so structured-reasoning clients
-          // (Pal Chat, OpenRouter-style apps) can render their own UI.
+          if (recoveredToolCalls.length > 0) {
+            finalMessage.tool_calls = [
+              ...(normalizedChoice.message?.tool_calls || []),
+              ...recoveredToolCalls
+            ];
+            // null content on tool-call turns matches real OpenAI responses
+            if (!finalMessage.content || !finalMessage.content.trim()) {
+              finalMessage.content = null;
+            }
+          }
+
           if (SHOW_REASONING && reasoning) {
             finalMessage.reasoning = reasoning;
             finalMessage.reasoning_content = reasoning;
@@ -782,7 +720,8 @@ app.post('/v1/chat/completions', async (req, res) => {
           const finalChoice = {
             ...normalizedChoice,
             index: i,
-            message: finalMessage
+            message: finalMessage,
+            ...(recoveredToolCalls.length > 0 && { finish_reason: 'tool_calls' })
           };
           return finalChoice;
         }),
@@ -795,12 +734,14 @@ app.post('/v1/chat/completions', async (req, res) => {
 
       res.json(openaiResponse);
     }
-
   } catch (error) {
     console.error('[PROXY] Fatal error:', error.message);
     console.error('[PROXY] NIM response:', error.response?.data);
 
     if (!res.headersSent) {
+      // Express only sets Content-Type if unset; force JSON in case the
+      // streaming branch already set text/event-stream before failing.
+      res.set('Content-Type', 'application/json');
       res.status(error.response?.status || 500).json({
         error: {
           message: error.message,
@@ -835,12 +776,11 @@ app.use((req, res) => {
   });
 });
 
-// ─── Startup ───────────────────────────────────────────────────────────────
+// ─── Startup ──────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {
   console.log(`[PROXY] Hybrid proxy running on port ${PORT}`);
   console.log(`[PROXY] Max tokens limit: ${MAX_TOKENS_LIMIT}`);
-
   validateModels().catch(err => {
     console.error('[VALIDATION] Startup check failed:', err.message);
   });

@@ -4,12 +4,12 @@ Here is the link to his fork: https://github.com/skywalker14017/nim-to-openai-pr
 
 ### If you forked before June 7, 2026, please pull the latest version — previous versions had an auth bypass and startup DDoS vulnerability.
 
-### Reasoning officially works! Aside from Gemma and M3, every model (that supports reasoning) works. To use reasoning, use the [optional environmental variables](#optional-environment-variables) section!
+### Reasoning officially works! Every model (that supports reasoning) works. To use reasoning, use the [optional environmental variables](#optional-environment-variables) section!
 
 
 ### NVIDIA NIM to OpenAI Proxy
 Hello, this is my first ever project on Github that I am making public. This is essentially just a translation layer between the API format that NVIDIA NIM uses to the format OpenAI uses. Jontte made this originally by building on a script from a Reddit guide. Over the time of a month he iterated on it, fixed problems, added auth, more models, and removed/replaced deprecated models.
-These are the current available models for usage, and the use cases for all of them. (Note: The Google models are mostly for troubleshooting issues with latency and timeouts.)
+These are the current available models for usage, and the use cases for all of them. 
 
 ### Why use this proxy?
 
@@ -28,50 +28,45 @@ Node.js 24+, a NVAPI/Nim API key, a deployment platform (though if you follow th
 
 | Alias | Backend Model | Best For | Speed | Filters |
 |---|---|---|---|---|
-| `gpt-4-turbo` | `moonshotai/kimi-k2.6` | Deep, immersive RP | Medium | Medium-High |
+| `gpt-4-turbo` | `moonshotai/kimi-k3` | Deep, immersive RP & coding | Slow| Medium-High |
 | `gpt-4` | `nvidia/nemotron-3-ultra-550b-a55b` | Immersive RP | Fast | Low |
-| `gpt-4o` | `deepseek-ai/deepseek-v4-pro` | Coding, non-edgy RP | Slow | High |
-| `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash` | Fast, non-edgy RP | Fast | High |
-| `gpt-3.5o` | `nvidia/nemotron-mini-4b-instruct` | Lightweight RP, fast responses | Very Fast | Low |
-| `gemini-pro` | `nvidia/llama-3.3-nemotron-super-49b-v1.5` | Daily driver, low latency | Fast | Low |
-| `gemini-turbo` | `meta/llama-3.3-70b-instruct` | Fast general purpose | Fast | Low-Medium |
-| `gemini-turbo?` | `abacusai/dracarys-llama-3.1-70b-instruct` | Fine-tuned variant of above | Fast | Low-Medium |
-| `mistral` | `mistralai/mistral-large-3-675b-instruct-2512` | Best quality, unfiltered | Very Slow | Low |
-| `mistral-turbo` | `mistralai/mistral-medium-3.5-128b` | Fast fallback | Fast | Low |
-| `mistral-pro` | `mistralai/mistral-small-4-119b-2603` | Lightweight scenes | Very Fast | Low |
-| `mistral-fast` | `mistralai/ministral-14b-instruct-2512` | Fast, compact Mistral | Very Fast | Low |
+| `gpt-4-flash` | `deepseek-ai/deepseek-v4-flash-0731` | Fast, non-edgy RP | Fast | High |
+| `gpt-4o` | `deepseek-ai/deepseek-v4-pro-0813` | Coding | Slow | High |
+| `gpt-3.5o` | `nvidia/nemotron-3.5-lightning-30b-a3b` | General chat, fast lightweight tasks | Very Fast | Low-Medium |
+| `gemini-pro` | `nvidia/llama-3.1-nemotron-70b-instruct` | Daily driver, low latency | Fast | Low |
+| `gemini-turbo` | `nvidia/llama3-chatqa-1.5-70b` | Fast general purpose | Fast | Low-Medium |
+| `mistral` | `mistralai/mistral-large-2-instruct` | Best quality, unfiltered | Slow | Low |
+| `mistral-turbo` | `nv-mistralai/mistral-nemo-12b-instruct` | Fast fallback | Very Fast | Low |
+| `mistral-pro` | `mistralai/mistral-7b-instruct-v0.3` | Lightweight scenes | Very Fast | Low |
+| `mistral-fast` | `nvidia/mistral-nemo-minitron-8b-8k-instruct` | Fast, compact Mistral | Very Fast | Low |
 | `mistral-nemo` | `mistralai/mistral-nemotron` | Casual/anime RP | Fast | Low |
 | `claude-3-opus` | `openai/gpt-oss-120b` | Alternative to Chinese models | Medium | Low-Medium |
 | `claude-3-sonnet` | `openai/gpt-oss-20b` | Fast, distinct voice | Fast | Low-Medium |
-| `glm-5.2` | `z-ai/glm-5.2` | General purpose & Coding | Medium | Medium |
 | `gpt-3.5-turbo` | `nvidia/nemotron-3-super-120b-a12b` | Lightweight tasks | Fast | Low |
-| `gpt-3.5` | `qwen/qwen3.5-397b-a17b` | Qwen fallback | Medium | Medium |
+| `gpt-3.5` | `nvidia/nemotron-3-nano-30b-a3b` | Nvidia nano fallback | Fast | Low |
 | `google-light` | `google/gemma-4-31b-it` | Short scenes, fast | Fast | Low-Medium |
-| `google-lighter` | `google/gemma-3n-e4b-it` | Mostly testing only | Very Fast | Low-Medium |
-| `google-lightest` | `google/gemma-2-2b-it` | Testing only | Extremely fast | Low |
-| `m2.7` | `minimaxai/minimax-m2.7` | Experimental | Medium | Unknown (to me) |
-| `m3` | `minimaxai/minimax-m3` | Experimental | fast | Unknown (to me) |
-| `step-3.5-flash` | `stepfun-ai/step-3.5-flash` | Chinese creative model | Fast | Medium |
-| `step-3.7-flash` | `stepfun-ai/step-3.7-flash` | Chinese creative model | Fast | Medium |
+| `google-lighter` | `poolside/laguna-xs-2.1` | Coding | Fast | Unknown (to me) |
+| `google-lightest` | `meta/muse-glimmer-30b` | Coding & Agentic work | Fast | Unknown (to me) |
+| `m3` | `minimaxai/minimax-m3` | Experimental | Medium-High | Unknown (to me) |
 
 ### Filter Guide
 
 | If your use-case involves... | Avoid | Use instead |
 |---|---|---|
-| Dark themes, violence, mature content | `gpt-4o`, `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
-| Fast responses needed | `mistral` (675B) | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
-| Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4`, `gpt-4o`, `glm-5.2` |
+| Dark themes, violence, mature content | `gpt-4-flash`, `gpt-4-turbo` (They have high filters due to being based in China) | `mistral`, `gemini-pro`, `claude-3-opus` |
+| Fast responses needed | `gpt-4o`, `gpt-4-turbo` | `gemini-pro`, `mistral-turbo`, `gpt-3.5o` |
+| Long context / memory | Anything under 30B | `gpt-4-turbo`, `mistral`, `gpt-4` |
 | Testing / very fast replies | — | `google-lightest`, `gpt-3.5o` |
-| Coding / Long horizon work | — | `glm-5.2`, `gpt-4o` |
+| Coding / Long horizon work | — | `gpt-4-turbo`, `gpt-4o` |
 
 ### Fallback Chain
 
 If your requested model fails, the proxy automatically tries:
 1. Requested model
-2. `mistralai/mistral-medium-3.5-128b`
-3. `mistralai/mistral-small-4-119b-2603`
-4. `nvidia/llama-3.3-nemotron-super-49b-v1.5`
-5. `google/gemma-4-31b-it`
+2. `google/gemma-4-31b-it`
+3. `openai/gpt-oss-20b`
+4. `mistralai/mistral-nemotron`
+5. `nvidia/nemotron-3-super-120b-a12b`
 
 All fallbacks are non-Chinese-hosted to avoid filter interruption mid-scene. These can be changed, but i found that these four work best as fallbacks.
 
@@ -103,7 +98,7 @@ After deploying, you can set these in Railway's **Variables** tab (reasoning doe
 | `ENABLE_THINKING_MODE` | `true` | Sends thinking parameters to supported models |
 | `DISCORD_WEBHOOK_URL` | Webhook URL | Alerts you when models fail validation |
 | `SKIP_VALIDATION` | `true` | Disables startup model checks |
-
+| `DEBUG_MODE` | `true` | Allows you to debug everything going on. |
 
 Set to `false` or remove to disable. Changes apply without redeploying.
 
@@ -112,7 +107,7 @@ Set to `false` or remove to disable. Changes apply without redeploying.
 | Problem | Likely Cause | Fix |
 |---|---|---|
 | "All models failed" error | NIM API key invalid or expired | Regenerate key at build.nvidia.com |
-| Very slow responses | Using `mistral` (675B) or Chinese models during peak hours | Switch to `gemini-pro`, `mistral-turbo`, or `gpt-3.5o` |
+| Very slow responses | Using `gpt-4o`, `gpt-4-turbo`, or other Chinese-hosted models during peak hours | Switch to `gemini-pro`, `mistral-turbo`, or `gpt-3.5o` |
 | Filter interrupts RP | Using Chinese-hosted model for mature content | Use `mistral`, `gemini-pro`, or `claude-3-opus` |
 | 404 on `/v1/chat/completions` | Auth mismatch | Verify `CLIENT_AUTH_KEY` matches between Railway and client |
 | "Failed to fetch (unk)" / "A network error occurred" | JanitorAI cached old proxy config after changing URL or model | **Reload the page** — changes don't apply until refresh |
@@ -129,7 +124,7 @@ This is a personal project I am maintaining for my own use, but I'm happy if it 
 - Documentation improvements
 
 ### What I'm less likely to merge
-- Major architectural changes 
+- Major architectural changes.
 - Features I don't personally use (harder for me to maintain)
 - Anything that adds complexity without clear benefit
 
