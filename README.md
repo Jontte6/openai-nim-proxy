@@ -1,5 +1,6 @@
 ### Announcement 
-Due to personal health reasons, the project will no longer be maintained by the old owner (Jontte), I’ll try to maintain this for the time being!
+Due to personal health reasons, I will no longer be able to maintain this project. Check Skywalker's fork for more recent updates, though i will work with him to merge updates to this repo every now and then.
+Here is the link to his fork: https://github.com/skywalker14017/nim-to-openai-proxy
 
 ### If you forked before June 7, 2026, please pull the latest version — previous versions had an auth bypass and startup DDoS vulnerability.
 
@@ -70,8 +71,8 @@ If your requested model fails, the proxy automatically tries:
 All fallbacks are non-Chinese-hosted to avoid filter interruption mid-scene. These can be changed, but i found that these four work best as fallbacks.
 
 ### Auth Guide
-Jontte added auth middleware that wasn't present in the code he built upon. It uses an env var in your deployment. Use any secure string of 32+ characters, or generate one by hashing your NVAPI key. I recommend using an online hash tool or command to make a hash of your NVAPI key since the key is already complex as is, and a hash makes it more secure as it cannot be realistically reversed back to the NVAPI key. The first 32 characters of the hash are enough.
-You can easily generate the hash with an online SHA-256 generator or any hash tool. Then make an env variable called "CLIENT_AUTH_KEY" and enter the first 32 characters of your hash into the variable (or any custom length over 16, or a custom key). Enter the hash into the API Key field of your frontend.
+I added auth middleware that wasn't present in the code I built upon. It uses an env var in your deployment. Use any secure string of 32+ characters, or generate one by hashing your NVAPI key. I recommend using an online hash tool or command to make a hash of your NVAPI key since the key is already complex as is, and a hash makes it more secure as it cannot be realistically reversed back to the NVAPI key. The first 32 characters of the hash are enough.
+You can easily generate the hash with an online SHA-256 generator or any hash tool. Then make an env variable called "CLIENT_AUTH_KEY" and enter the first 32 characters of your hash into the variable (or any custom length over 16, or a custom key). Enter the hash into the API Key field in JanitorAI/SillyTavern.
 
 ### Proxy Setup Guide
 
@@ -138,8 +139,8 @@ When reporting bugs, include:
 - Your deployment platform (Railway, Render, etc.)
 
 ## Contact
-Need to reach out faster? Add me on Discord, my username is - `Skywalker_1401`. I’ll respond faster on Discord than Github.
+Need to reach out faster? Add Skywalker on Discord, his username is - `Skywalker_1401`. He'll respond faster on Discord than Github.
 
 ## Disclaimer
 
-I am not a professional developer. Most of this whole project was made by Jontte, I’m just the current maintainer. Jontte made this project with the help of AI tools and community guides.
+I am not a professional developer.
