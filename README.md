@@ -129,7 +129,7 @@ This is a personal project I am maintaining for my own use, but I'm happy if it 
 - Documentation improvements
 
 ### What I'm less likely to merge
-- Major architectural changes (I want to keep this simple as to honour Jontte’s wishes.)
+- Major architectural changes 
 - Features I don't personally use (harder for me to maintain)
 - Anything that adds complexity without clear benefit
 
@@ -144,8 +144,8 @@ When reporting bugs, include:
 - Your deployment platform (Railway, Render, etc.)
 
 ## Contact
-Need to reach out faster? Add me on Discord, my username is - `Skywalker_1401`. I’ll respond faster on Discord than Github.
+Need to reach out faster? Add Skywalker on Discord, his username is - `Skywalker_1401`. He'll respond faster on Discord than Github.
 
 ## Disclaimer
 
-I am not a professional developer. This whole project was made by Jontte, I’m just the current maintainer. Jontte made this project with the help of AI tools and community guides. 
+I am not a professional developer.
